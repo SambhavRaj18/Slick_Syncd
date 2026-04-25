@@ -1,0 +1,11 @@
+
+mediapipe
+serial
+
+numpy
+
+
+ultralytics
+threading
+speech_recognition
+pyttsx3
