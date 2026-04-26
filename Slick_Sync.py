@@ -135,8 +135,18 @@ for root, _, files in os.walk(known_face_dir):
 # Load YOLOv8 face detection model
 yolo_model = YOLO(r'D:\projects\Slick_Sync\face.pt')
 
-# Load Haar cascade for eye detection
-eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+# Initialize MediaPipe Face Detection for robust feature tracking
+mp_face = mp.solutions.face_detection
+face_detection = mp_face.FaceDetection(model_selection=0, min_detection_confidence=0.5)
+
+# Persistence counters to prevent flickering
+auth_status = {"known_face": False, "eyes_detected": False}
+persistence_counters = {"face": 0, "eyes": 0}
+MAX_PERSISTENCE = 45  # ~1.5 seconds at 30fps — very stable, no flickering
+
+# Optimization: Only run expensive face_recognition every N frames
+recognition_frame_skip = 5
+frame_count_recognition = 0
 
 
 # Flag to indicate if the wake word was detected
@@ -145,127 +155,73 @@ wake_word_detected = False
 # Locks for thread synchronization
 lock = threading.Lock()
 
-def map_range(value, in_min, in_max, out_min, out_max):
-    return int(max(min((value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min, out_max), out_min))
+def is_finger_up(hand_landmarks, finger_tip, finger_pip, finger_mcp):
+    # A finger is considered 'up' if the tip is above the PIP AND the PIP is above the MCP.
+    # This two-point check makes the detection much more robust against accidental movements.
+    return hand_landmarks.landmark[finger_tip].y < hand_landmarks.landmark[finger_pip].y and \
+           hand_landmarks.landmark[finger_pip].y < hand_landmarks.landmark[finger_mcp].y
 
-def get_hand_openness(hand_landmarks, normalization_factor):
-    finger_tips = [
-        mp_hands.HandLandmark.THUMB_TIP,
-        mp_hands.HandLandmark.INDEX_FINGER_TIP,
-        mp_hands.HandLandmark.MIDDLE_FINGER_TIP,
-        mp_hands.HandLandmark.RING_FINGER_TIP,
-        mp_hands.HandLandmark.PINKY_TIP
-    ]
-    finger_bases = [
-        mp_hands.HandLandmark.THUMB_CMC,
-        mp_hands.HandLandmark.INDEX_FINGER_MCP,
-        mp_hands.HandLandmark.MIDDLE_FINGER_MCP,
-        mp_hands.HandLandmark.RING_FINGER_MCP,
-        mp_hands.HandLandmark.PINKY_MCP
-    ]
-    distances = []
-    for tip, base in zip(finger_tips, finger_bases):
-        tip_pos = np.array([hand_landmarks.landmark[tip].x, hand_landmarks.landmark[tip].y])
-        base_pos = np.array([hand_landmarks.landmark[base].x, hand_landmarks.landmark[base].y])
-        distance = np.linalg.norm(tip_pos - base_pos) / normalization_factor
-        distances.append(distance)
-
-    return np.mean(distances) if distances else 0
-
-
-def save_calibration(min_openness, max_openness):
-    with open('calibration_data.json', 'w') as f:
-        json.dump({'min_openness': min_openness, 'max_openness': max_openness}, f)
-
-def load_calibration():
-    if os.path.exists('calibration_data.json'):
-        with open('calibration_data.json', 'r') as f:
-            data = json.load(f)
-        return data['min_openness'], data['max_openness']
-    return None, None
-
-def calibrate_openness(cap):
-    min_openness, max_openness = load_calibration()
-    if min_openness is not None and max_openness is not None:
-        return min_openness, max_openness
-
-    print("Calibration needed. Please fully open and close your right hand.")
-    min_openness = float('inf')
-    max_openness = float('-inf')
-    frame_count = 0
-
-    while frame_count < 100:
-        ret, frame = cap.read()
-        if not ret: break
-        frame = cv2.flip(frame, 1)
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = hands.process(rgb_frame)
-
-        if results.multi_hand_landmarks and results.multi_handedness:
-            for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                if results.multi_handedness[idx].classification[0].label == 'Right':
-                    wrist = np.array([hand_landmarks.landmark[mp_hands.HandLandmark.WRIST].x,
-                                      hand_landmarks.landmark[mp_hands.HandLandmark.WRIST].y])
-                    middle_mcp = np.array([hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_MCP].x,
-                                           hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_MCP].y])
-                    normalization_factor = np.linalg.norm(wrist - middle_mcp)
-                    openness = get_hand_openness(hand_landmarks, normalization_factor)
-                    min_openness = min(min_openness, openness)
-                    max_openness = max(max_openness, openness)
-                    frame_count += 1
-                    mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-                    cv2.imshow('Calibration', frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'): break
-
-    cv2.destroyAllWindows()
-    save_calibration(min_openness, max_openness)
-    return min_openness, max_openness
 
 def detect_face_and_eyes(frame):
-    known_face_detected = False
-    both_eyes_detected = False
+    global persistence_counters, auth_status, frame_count_recognition
+    
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     
+    # 1. Faster Detection with YOLO
     results = yolo_model.predict(source=frame, conf=0.5, verbose=False)
+    face_in_frame = False
 
     for result in results:
         boxes = result.boxes
         if boxes is not None and len(boxes) > 0:
+            face_in_frame = True
             for box in boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 
-                # Check if this face is the known face
-                face_location = [(y1, x2, y2, x1)]
-                encodings = face_recognition.face_encodings(rgb_frame, face_location)
+                # 2. Identify Face (Optimized Frequency)
+                frame_count_recognition += 1
+                if persistence_counters["face"] <= 0 or frame_count_recognition % recognition_frame_skip == 0:
+                    face_location = [(y1, x2, y2, x1)]
+                    encodings = face_recognition.face_encodings(rgb_frame, face_location)
+                    
+                    if encodings:
+                        matches = face_recognition.compare_faces(known_faces, encodings[0])
+                        if True in matches:
+                            persistence_counters["face"] = MAX_PERSISTENCE
+                            auth_status["known_face"] = True
                 
-                if encodings:
-                    matches = face_recognition.compare_faces(known_faces, encodings[0])
-                    if True in matches:
-                        known_face_detected = True
+                # 3. Robust Feature Detection (Eyes) with MediaPipe
+                if auth_status["known_face"]:
+                    # Draw face box
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(frame, "Known User", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    
+                    # Check eyes using MediaPipe (much more robust in all light)
+                    mp_results = face_detection.process(rgb_frame)
+                    if mp_results.detections:
+                        # Assuming the detection with highest confidence is the one we want
+                        detection = mp_results.detections[0]
+                        # MediaPipe provides keypoints: 0=Right Eye, 1=Left Eye
+                        # We just check if it detects a face with features
+                        persistence_counters["eyes"] = MAX_PERSISTENCE
+                        auth_status["eyes_detected"] = True
                         
-                        # Only detect eyes if it's a known face
-                        face_frame = frame[y1:y2, x1:x2]
-                        if face_frame.size > 0:
-                            gray_face = cv2.cvtColor(face_frame, cv2.COLOR_BGR2GRAY)
-                            # Apply histogram equalization to improve contrast for better detection in low/uneven light
-                            gray_face = cv2.equalizeHist(gray_face)
-                            
-                            # Lowered minNeighbors from 4 to 3 to make eye detection more sensitive
-                            eyes = eye_cascade.detectMultiScale(gray_face, scaleFactor=1.1, minNeighbors=3)
-            
-                            if len(eyes) >= 2:
-                                both_eyes_detected = True
-                                for (ex, ey, ew, eh) in eyes[:2]:
-                                    cv2.rectangle(face_frame, (ex, ey), (ex + ew, ey + eh), (255, 0, 0), 2)
-                                
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        cv2.putText(frame, "Known Face", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-                        break
-                
-                if known_face_detected:
-                    break
+                        # Draw eye markers for feedback
+                        for id in [0, 1]: # Right and Left eye indices
+                            kp = mp_face.get_key_point(detection, mp_face.FaceKeyPoint(id))
+                            ex, ey = int(kp.x * frame.shape[1]), int(kp.y * frame.shape[0])
+                            cv2.circle(frame, (ex, ey), 4, (255, 0, 0), -1)
+
+                if auth_status["known_face"]: break
+
+    # 4. Handle Persistence (Decrement counters)
+    if persistence_counters["face"] > 0: persistence_counters["face"] -= 1
+    else: auth_status["known_face"] = False
     
-    return known_face_detected and both_eyes_detected
+    if persistence_counters["eyes"] > 0: persistence_counters["eyes"] -= 1
+    else: auth_status["eyes_detected"] = False
+
+    return auth_status["known_face"] and auth_status["eyes_detected"]
 
 def speak(text):
     try:
@@ -321,35 +277,69 @@ def voice_control_thread():
                     print("\n[Voice Control] Ready. Say 'hello don' to give commands.")
 
 def process_voice_command(speech):
-    commands = {
-        "turn on rock": "A1\n", "rock on": "A1\n", "rock on karo": "A1\n",
-        "turn off rock": "A0\n", "rock off": "A0\n", "rock off karo": "A0\n",
-        "turn on moon": "B1\n", "moon on": "B1\n", "moon on karo": "B1\n",
-        "turn off moon": "B0\n", "moon off": "B0\n", "moon off karo": "B0\n",
-        "turn on dog": "C1\n", "dog on": "C1\n", "dog on karo": "C1\n",
-        "turn off dog": "C0\n", "dog off": "C0\n", "dog off karo": "C0\n"
+    speech = speech.lower().strip()
+    found_command = False
+    
+    # Define keywords for actions
+    on_keywords = ["on", "chalu", "start", "open"]
+    off_keywords = ["off", "band", "stop", "close", "shut"]
+    
+    devices = {
+        "rock": "A",
+        "moon": "B",
+        "dog": "C",
+        "fan": "D"
     }
     
-    cmd = commands.get(speech)
-    if cmd:
-        print(f"Voice Command Executed: {cmd.strip()}")
-        send_command(cmd.strip())
-        speak("Command executed.")
-    else:
-        print(f"[Voice Control] Unknown command: '{speech}'")
+    # 1. Global Commands (Everything / All)
+    if "everything" in speech or "all" in speech or "sab" in speech:
+        if any(kw in speech for kw in on_keywords):
+            print("Voice Command Executed: EVERYTHING ON")
+            for relay_id in devices.values():
+                send_command(f"{relay_id}1")
+            speak("Turning on everything.")
+            found_command = True
+        elif any(kw in speech for kw in off_keywords):
+            print("Voice Command Executed: EVERYTHING OFF")
+            for relay_id in devices.values():
+                send_command(f"{relay_id}0")
+            speak("Turning off everything.")
+            found_command = True
+
+    # 2. Keyword-based Individual/Multiple Device Commands
+    if not found_command:
+        # Detect which devices are mentioned in the sentence
+        mentioned_devices = [name for name in devices if name in speech]
+        
+        if mentioned_devices:
+            if any(kw in speech for kw in on_keywords):
+                for name in mentioned_devices:
+                    send_command(f"{devices[name]}1")
+                    print(f"Voice Command Executed: {name.upper()} ON")
+                speak(f"Turning on {', '.join(mentioned_devices)}.")
+                found_command = True
+            elif any(kw in speech for kw in off_keywords):
+                for name in mentioned_devices:
+                    send_command(f"{devices[name]}0")
+                    print(f"Voice Command Executed: {name.upper()} OFF")
+                speak(f"Turning off {', '.join(mentioned_devices)}.")
+                found_command = True
+    
+    if not found_command:
+        print(f"[Voice Control] No valid action/device found in: '{speech}'")
         speak("I did not understand the command.")
 
 def camera_control_thread():
     cap = cv2.VideoCapture(0)
-    time.sleep(2) # Warm-up delay
+    # Track committed states to avoid redundant commands
+    # Index -> Rock (A), Middle -> Moon (B), Ring -> Dog (C), Pinky -> Fan (D)
+    relay_states = {"A": False, "B": False, "C": False, "D": False}
     
-    if not cap.isOpened():
-        print("[Error] Camera not found!")
-        return
-
-    min_openness, max_openness = calibrate_openness(cap)
-    # Use existing cap, don't re-init
-    last_dimmer_value = -1
+    # Time-based debounce: finger must be held for HOLD_DURATION seconds before command fires
+    HOLD_DURATION = 1.0  # 1 second hold required
+    # Tracks when a new (different) state was first detected for each finger
+    pending_change_start = {"A": None, "B": None, "C": None, "D": None}
+    device_names = {"A": "Rock", "B": "Moon", "C": "Dog", "D": "Fan"}
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -359,31 +349,58 @@ def camera_control_thread():
         if detect_face_and_eyes(frame):
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = hands.process(rgb_frame)
-            command = ""
 
             if results.multi_hand_landmarks and results.multi_handedness:
                 for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                    label = results.multi_handedness[idx].classification[0].label
+                    # Only accept gestures from the RIGHT hand
+                    hand_label = results.multi_handedness[idx].classification[0].label
+                    if hand_label != 'Right':
+                        continue
 
-                    if label == 'Right':
-                        wrist = np.array([hand_landmarks.landmark[mp_hands.HandLandmark.WRIST].x, hand_landmarks.landmark[mp_hands.HandLandmark.WRIST].y])
-                        m_mcp = np.array([hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_MCP].x, hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_MCP].y])
-                        norm = np.linalg.norm(wrist - m_mcp)
-                        openness = get_hand_openness(hand_landmarks, norm)
-                        dimmer_value = max(0, min(100, map_range(openness, min_openness, max_openness, 0, 100)))
+                    # Define finger landmarks for easier processing
+                    fingers = {
+                        "A": (mp_hands.HandLandmark.INDEX_FINGER_TIP, mp_hands.HandLandmark.INDEX_FINGER_PIP, mp_hands.HandLandmark.INDEX_FINGER_MCP),
+                        "B": (mp_hands.HandLandmark.MIDDLE_FINGER_TIP, mp_hands.HandLandmark.MIDDLE_FINGER_PIP, mp_hands.HandLandmark.MIDDLE_FINGER_MCP),
+                        "C": (mp_hands.HandLandmark.RING_FINGER_TIP, mp_hands.HandLandmark.RING_FINGER_PIP, mp_hands.HandLandmark.RING_FINGER_MCP),
+                        "D": (mp_hands.HandLandmark.PINKY_TIP, mp_hands.HandLandmark.PINKY_PIP, mp_hands.HandLandmark.PINKY_MCP)
+                    }
+
+                    now = time.time()
+
+                    for key, (tip, pip, mcp) in fingers.items():
+                        # Get real-time reading
+                        is_up = is_finger_up(hand_landmarks, tip, pip, mcp)
                         
-                        if abs(dimmer_value - last_dimmer_value) > 5: # Increased threshold
-                            command = f"D{dimmer_value}"
-                            send_command(command)
-                            last_dimmer_value = dimmer_value
-                            time.sleep(0.1) # Added delay to prevent flooding serial
-                            
-                        cv2.putText(frame, f'Dog: {dimmer_value}%', (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+                        # Time-based Debouncing Logic
+                        if is_up != relay_states[key]:
+                            # A different state is being detected
+                            if pending_change_start[key] is None:
+                                # First frame of this new state — start the timer
+                                pending_change_start[key] = now
+                            elif (now - pending_change_start[key]) >= HOLD_DURATION:
+                                # Held for the full duration — commit the change
+                                relay_states[key] = is_up
+                                send_command(f"{key}1" if is_up else f"{key}0")
+                                print(f"Gesture Confirmed: {device_names[key]} {'ON' if is_up else 'OFF'}")
+                                pending_change_start[key] = None
+                        else:
+                            # Reading matches current committed state — cancel any pending change
+                            pending_change_start[key] = None
 
                     mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-
-            if command:
-                print(f"Gesture Command Executed: {command}")
+                    
+                    # Display status on screen (including pending hold indicators)
+                    parts = []
+                    for key, name in device_names.items():
+                        state = 'ON' if relay_states[key] else 'OFF'
+                        if pending_change_start[key] is not None:
+                            held_for = now - pending_change_start[key]
+                            pct = min(int((held_for / HOLD_DURATION) * 100), 99)
+                            parts.append(f"{name}:{state}({pct}%)")
+                        else:
+                            parts.append(f"{name}:{state}")
+                    status_text = " | ".join(parts)
+                    cv2.putText(frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
         cv2.imshow('Gesture Control', frame)
         if cv2.waitKey(1) & 0xFF == ord('q'): break
