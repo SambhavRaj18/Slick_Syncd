@@ -13,32 +13,103 @@ import mediapipe.python.solutions.hands as mp_hands
 import mediapipe.python.solutions.drawing_utils as mp_draw
 import face_recognition
 import serial
+from flask import Flask, jsonify    
 
-# Configure Serial Communication
-try:
-    ser = serial.Serial('COM5', 9600, timeout=1)
-    time.sleep(2)
-    serial_active = True
-except Exception as e:
-    print(f"Error opening serial port: {e}")
-    serial_active = False
+# Configure Serial Communication with Reconnect Logic
+def connect_serial():
+    global ser, serial_active
+    try:
+        if 'ser' in globals() and ser.is_open:
+            ser.close()
+        ser = serial.Serial('COM5', 9600, timeout=1)
+        time.sleep(2)
+        serial_active = True
+        print("\n[SERIAL] Connected to ESP8266 on COM5")
+        return True
+    except Exception as e:
+        serial_active = False
+        return False
 
+connect_serial()
 serial_lock = threading.Lock()
 
 def send_command(cmd):
     global serial_active
     if not serial_active:
-        print("\n!!! [FATAL ERROR] Cannot send command to ESP8266 !!!")
-        print("!!! The USB Port (COM5) is blocked by the Arduino Serial Monitor !!!\n")
-        return
+        if not connect_serial():
+            print(f"[SERIAL] Port still blocked. Cannot send: {cmd.strip()}")
+            return
         
     with serial_lock:
         try:
-            ser.write((cmd + "\n").encode())
-            time.sleep(0.03)
+            full_cmd = cmd.strip() + "\n"
+            ser.write(full_cmd.encode())
+            print(f">>> Serial Sent: {full_cmd.strip()}")
+            time.sleep(0.05)
         except Exception as e:
-            print(f"Serial write error: {e}")
+            print(f"!!! [SERIAL] Write error: {e} !!!")
             serial_active = False
+
+# Initialize Flask
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Slick Sync Backend Running"
+
+@app.route('/rock/on')
+def rock_on():
+    print("API Command: Rock On (A1)")
+    send_command("A1")
+    return jsonify({"status": "Rock Light On"})
+
+@app.route('/rock/off')
+def rock_off():
+    print("API Command: Rock Off (A0)")
+    send_command("A0")
+    return jsonify({"status": "Rock Light Off"})
+
+@app.route('/moon/on')
+def moon_on():
+    print("API Command: Moon On (B1)")
+    send_command("B1")
+    return jsonify({"status": "Moon Light On"})
+
+@app.route('/moon/off')
+def moon_off():
+    print("API Command: Moon Off (B0)")
+    send_command("B0")
+    return jsonify({"status": "Moon Light Off"})
+
+@app.route('/dog/on')
+def dog_on():
+    print("API Command: Dog On (C1)")
+    send_command("C1")
+    return jsonify({"status": "Dog Light On"})
+
+@app.route('/dog/off')
+def dog_off():
+    print("API Command: Dog Off (C0)")
+    send_command("C0")
+    return jsonify({"status": "Dog Light Off"})
+
+@app.route('/fan/on')
+def fan_on():
+    print("API Command: Fan On (D1)")
+    send_command("D1")
+    return jsonify({"status": "Fan On"})
+
+@app.route('/fan/off')
+def fan_off():
+    print("API Command: Fan Off (D0)")
+    send_command("D0")
+    return jsonify({"status": "Fan Off"})
+
+@app.route('/status')
+def status():
+    return jsonify({"status": "online", "serial_active": serial_active})
+
+
 
 # Initialize MediaPipe Hand module
 mp_hands = mp.solutions.hands
@@ -270,8 +341,14 @@ def process_voice_command(speech):
 
 def camera_control_thread():
     cap = cv2.VideoCapture(0)
+    time.sleep(2) # Warm-up delay
+    
+    if not cap.isOpened():
+        print("[Error] Camera not found!")
+        return
+
     min_openness, max_openness = calibrate_openness(cap)
-    cap = cv2.VideoCapture(0) # Re-init for main loop
+    # Use existing cap, don't re-init
     last_dimmer_value = -1
 
     while cap.isOpened():
@@ -295,10 +372,11 @@ def camera_control_thread():
                         openness = get_hand_openness(hand_landmarks, norm)
                         dimmer_value = max(0, min(100, map_range(openness, min_openness, max_openness, 0, 100)))
                         
-                        if abs(dimmer_value - last_dimmer_value) > 3:
+                        if abs(dimmer_value - last_dimmer_value) > 5: # Increased threshold
                             command = f"D{dimmer_value}"
                             send_command(command)
                             last_dimmer_value = dimmer_value
+                            time.sleep(0.1) # Added delay to prevent flooding serial
                             
                         cv2.putText(frame, f'Dog: {dimmer_value}%', (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
 
@@ -321,6 +399,30 @@ if __name__ == "__main__":
     # Start camera control thread
     camera_thread = threading.Thread(target=camera_control_thread, daemon=True)
     camera_thread.start()
+
+    # Start serial reader thread
+    def serial_reader():
+        global serial_active
+        while True:
+            if serial_active:
+                try:
+                    if ser.in_waiting > 0:
+                        line = ser.readline().decode('utf-8').strip()
+                        if line:
+                            print(f"[ESP8266 says]: {line}")
+                except Exception as e:
+                    print(f"Serial Read Error: {e}")
+                    time.sleep(1)
+            time.sleep(0.01)
+
+    reader_thread = threading.Thread(target=serial_reader, daemon=True)
+    reader_thread.start()
+
+    flask_thread = threading.Thread(
+        target=lambda: app.run(host='0.0.0.0', port=5000, debug=False),
+        daemon=True
+    )
+    flask_thread.start()
 
     try:
         # Keep main thread alive while background threads run

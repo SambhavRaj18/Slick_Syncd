@@ -14,6 +14,7 @@ import mediapipe.python.solutions.drawing_utils as mp_draw
 import face_recognition
 import serial
 
+
 # Configure Serial Communication
 try:
     ser = serial.Serial('COM5', 9600, timeout=1)
