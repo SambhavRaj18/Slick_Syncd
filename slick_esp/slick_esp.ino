@@ -1,20 +1,21 @@
 /*
- * Slick Sync 3-Relay Setup (Standard Active-Low Logic)
+ * Slick Sync 4-Device Setup (3 Relays + 1 Fan/DC Control)
  */
 
-#define RELAY_1 14  // D5
-#define RELAY_2 12  // D6
-#define RELAY_3 13  // D7
+#define RELAY_1 14  // D5 - Rock
+#define RELAY_2 12  // D6 - Moon
+#define RELAY_3 13  // D7 - Dog
+#define FAN_PIN 5   // D1 - Fan (Changed from D8)
 
 void setup() {
   Serial.begin(9600);
   
-  // Most relays are Active-Low (LOW = ON, HIGH = OFF)
-  pinMode(RELAY_1, OUTPUT); digitalWrite(RELAY_1, HIGH); 
-  pinMode(RELAY_2, OUTPUT); digitalWrite(RELAY_2, HIGH); 
-  pinMode(RELAY_3, OUTPUT); digitalWrite(RELAY_3, HIGH); 
+  pinMode(RELAY_1, OUTPUT); digitalWrite(RELAY_1, LOW); 
+  pinMode(RELAY_2, OUTPUT); digitalWrite(RELAY_2, LOW); 
+  pinMode(RELAY_3, OUTPUT); digitalWrite(RELAY_3, LOW); 
+  pinMode(FAN_PIN, OUTPUT); digitalWrite(FAN_PIN, LOW); // Default OFF
   
-  Serial.println("Slick Sync Ready. Listening for commands...");
+  Serial.println("Slick Sync Ready. 4-Device Control Active (Active-HIGH).");
 }
 
 void loop() {
@@ -23,31 +24,32 @@ void loop() {
     command.trim();
     
     if (command.length() > 0) {
-      // BULB 1
+      // ROCK (A)
       if (command == "A1") {
-        digitalWrite(RELAY_1, LOW); // ON
-        Serial.println("Bulb 1 ON");
+        digitalWrite(RELAY_1, HIGH); Serial.println("Rock ON");
       } else if (command == "A0") {
-        digitalWrite(RELAY_1, HIGH); // OFF
-        Serial.println("Bulb 1 OFF");
+        digitalWrite(RELAY_1, LOW); Serial.println("Rock OFF");
       }
       
-      // BULB 2
+      // MOON (B)
       else if (command == "B1") {
-        digitalWrite(RELAY_2, LOW); // ON
-        Serial.println("Bulb 2 ON");
+        digitalWrite(RELAY_2, HIGH); Serial.println("Moon ON");
       } else if (command == "B0") {
-        digitalWrite(RELAY_2, HIGH); // OFF
-        Serial.println("Bulb 2 OFF");
+        digitalWrite(RELAY_2, LOW); Serial.println("Moon OFF");
       }
       
-      // BULB 3
+      // DOG (C)
       else if (command == "C1") {
-        digitalWrite(RELAY_3, LOW); // ON
-        Serial.println("Bulb 3 ON");
+        digitalWrite(RELAY_3, HIGH); Serial.println("Dog ON");
       } else if (command == "C0") {
-        digitalWrite(RELAY_3, HIGH); // OFF
-        Serial.println("Bulb 3 OFF");
+        digitalWrite(RELAY_3, LOW); Serial.println("Dog OFF");
+      }
+
+      // FAN (D)
+      else if (command == "D1") {
+        digitalWrite(FAN_PIN, HIGH); Serial.println("Fan ON");
+      } else if (command == "D0") {
+        digitalWrite(FAN_PIN, LOW); Serial.println("Fan OFF");
       }
     }
   }

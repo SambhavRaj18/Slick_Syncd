@@ -15,11 +15,16 @@ import face_recognition
 import serial
 from flask import Flask, jsonify    
 
+# Global Serial Variables (Initialized to clear warnings)
+ser = None
+serial_active = False
+serial_lock = threading.Lock()
+
 # Configure Serial Communication with Reconnect Logic
 def connect_serial():
     global ser, serial_active
     try:
-        if 'ser' in globals() and ser.is_open:
+        if ser is not None and ser.is_open:
             ser.close()
         ser = serial.Serial('COM5', 9600, timeout=1)
         time.sleep(2)
@@ -31,7 +36,7 @@ def connect_serial():
         return False
 
 connect_serial()
-serial_lock = threading.Lock()
+
 
 def send_command(cmd):
     global serial_active
@@ -167,19 +172,22 @@ def detect_face_and_eyes(frame):
     
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     
-    # 1. Faster Detection with YOLO
-    results = yolo_model.predict(source=frame, conf=0.5, verbose=False)
-    face_in_frame = False
-
+    # 1. Faster Detection with YOLO (Slightly higher confidence for stability)
+    results = yolo_model.predict(source=frame, conf=0.6, verbose=False)
+    face_currently_visible = False
+    
     for result in results:
         boxes = result.boxes
         if boxes is not None and len(boxes) > 0:
-            face_in_frame = True
+            face_currently_visible = True
             for box in boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 
-                # 2. Identify Face (Optimized Frequency)
+                # 2. Identify Face (Only run recognition on active detections)
+                is_this_box_authenticated = False
                 frame_count_recognition += 1
+                
+                # Run recognition every N frames OR if we aren't sure who this is yet
                 if persistence_counters["face"] <= 0 or frame_count_recognition % recognition_frame_skip == 0:
                     face_location = [(y1, x2, y2, x1)]
                     encodings = face_recognition.face_encodings(rgb_frame, face_location)
@@ -187,32 +195,33 @@ def detect_face_and_eyes(frame):
                     if encodings:
                         matches = face_recognition.compare_faces(known_faces, encodings[0])
                         if True in matches:
-                            persistence_counters["face"] = MAX_PERSISTENCE
+                            persistence_counters["face"] = 30 # ~1 second persistence
                             auth_status["known_face"] = True
+                            is_this_box_authenticated = True
+                elif auth_status["known_face"]:
+                    # If we were recently authenticated and YOLO is still seeing a face here, assume it's the same person
+                    is_this_box_authenticated = True
                 
                 # 3. Robust Feature Detection (Eyes) with MediaPipe
-                if auth_status["known_face"]:
-                    # Draw face box
+                if is_this_box_authenticated:
+                    # Draw face box ONLY for the authenticated person
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(frame, "Known User", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.putText(frame, "Authenticated", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                     
-                    # Check eyes using MediaPipe (much more robust in all light)
+                    # Check eyes using MediaPipe
                     mp_results = face_detection.process(rgb_frame)
                     if mp_results.detections:
-                        # Assuming the detection with highest confidence is the one we want
                         detection = mp_results.detections[0]
-                        # MediaPipe provides keypoints: 0=Right Eye, 1=Left Eye
-                        # We just check if it detects a face with features
-                        persistence_counters["eyes"] = MAX_PERSISTENCE
+                        persistence_counters["eyes"] = 30
                         auth_status["eyes_detected"] = True
                         
-                        # Draw eye markers for feedback
-                        for id in [0, 1]: # Right and Left eye indices
+                        # Draw eye markers
+                        for id in [0, 1]: 
                             kp = mp_face.get_key_point(detection, mp_face.FaceKeyPoint(id))
                             ex, ey = int(kp.x * frame.shape[1]), int(kp.y * frame.shape[0])
                             cv2.circle(frame, (ex, ey), 4, (255, 0, 0), -1)
 
-                if auth_status["known_face"]: break
+                if is_this_box_authenticated: break # Stop after finding the first valid authorized user
 
     # 4. Handle Persistence (Decrement counters)
     if persistence_counters["face"] > 0: persistence_counters["face"] -= 1
@@ -220,6 +229,10 @@ def detect_face_and_eyes(frame):
     
     if persistence_counters["eyes"] > 0: persistence_counters["eyes"] -= 1
     else: auth_status["eyes_detected"] = False
+
+    # CRITICAL: Only allow gestures if a face is ACTUALLY in the frame right now
+    if not face_currently_visible:
+        return False
 
     return auth_status["known_face"] and auth_status["eyes_detected"]
 
@@ -424,7 +437,7 @@ if __name__ == "__main__":
             if serial_active:
                 try:
                     if ser.in_waiting > 0:
-                        line = ser.readline().decode('utf-8').strip()
+                        line = ser.readline().decode('utf-8', errors='ignore').strip()
                         if line:
                             print(f"[ESP8266 says]: {line}")
                 except Exception as e:
