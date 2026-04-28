@@ -1,0 +1,21 @@
+# --- SMARTHOME AI RUN GUIDE ---
+
+# 1. RUN THE BACKEND (PYTHON)
+# Open a terminal and paste:
+cd D:\projects\Slick_Sync
+conda activate slicksync
+python Slick_Sync.py
+
+# --------------------------------------------------
+
+# 2. RUN THE APP (FLUTTER)
+# Open a SECOND terminal window and paste:
+cd D:\projects\first_project-main\first_game
+$env:Path += ";D:\flutter\bin"
+D:\flutter\bin\flutter.bat run -d chrome
+
+# --------------------------------------------------
+
+# NOTE: 
+# If you want to run on Windows Desktop instead of Chrome, use:
+# D:\flutter\bin\flutter.bat run -d windows

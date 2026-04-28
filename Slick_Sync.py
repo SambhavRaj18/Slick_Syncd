@@ -13,7 +13,12 @@ import mediapipe.python.solutions.hands as mp_hands
 import mediapipe.python.solutions.drawing_utils as mp_draw
 import face_recognition
 import serial
-from flask import Flask, jsonify    
+from flask import Flask, jsonify
+from flask_cors import CORS
+import firebase_admin
+from firebase_admin import credentials, db
+
+    
 
 # Global Serial Variables (Initialized to clear warnings)
 ser = None
@@ -55,8 +60,41 @@ def send_command(cmd):
             print(f"!!! [SERIAL] Write error: {e} !!!")
             serial_active = False
 
+# --- Firebase Initialization ---
+cred = credentials.Certificate('serviceAccountKey.json')
+firebase_admin.initialize_app(cred, {
+    'databaseURL': 'https://slicksync-afd0d-default-rtdb.asia-southeast1.firebasedatabase.app/'
+})
+
+def firebase_listener(event):
+    """Listens for changes in Firebase and sends commands to ESP8266"""
+    if event.data is None: return
+    
+    path = event.path.lower()
+    data = str(event.data).lower()
+    
+    print(f"[FIREBASE] Update: {path} -> {data}")
+    
+    # Map Firebase paths to Serial Commands
+    commands = {
+        "/rock": {"on": "A1", "off": "A0"},
+        "/moon": {"on": "B1", "off": "B0"},
+        "/dog":  {"on": "C1", "off": "C0"},
+        "/fan":  {"on": "D1", "off": "D0"},
+    }
+    
+    if path in commands and data in commands[path]:
+        cmd = commands[path][data]
+        send_command(cmd)
+
+# Start listening to the /devices node
+db.reference('/devices').listen(firebase_listener)
+
+
 # Initialize Flask
 app = Flask(__name__)
+CORS(app)
+
 
 @app.route('/')
 def home():
