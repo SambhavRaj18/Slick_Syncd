@@ -60,7 +60,7 @@ def send_command(cmd):
             print(f"!!! [SERIAL] Write error: {e} !!!")
             serial_active = False
 
-# --- Firebase Initialization ---
+# --- Firebase Initialization ---  
 cred = credentials.Certificate('serviceAccountKey.json')
 firebase_admin.initialize_app(cred, {
     'databaseURL': 'https://slicksync-afd0d-default-rtdb.asia-southeast1.firebasedatabase.app/'

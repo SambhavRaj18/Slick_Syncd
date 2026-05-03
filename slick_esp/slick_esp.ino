@@ -1,21 +1,35 @@
 /*
- * Slick Sync 4-Device Setup (3 Relays + 1 Fan/DC Control)
+ * Slick Sync - Final Stable Firmware
+ * Logic: Floating/High-Impedance for 5V Relay Compatibility
  */
 
 #define RELAY_1 14  // D5 - Rock
 #define RELAY_2 12  // D6 - Moon
 #define RELAY_3 13  // D7 - Dog
-#define FAN_PIN 5   // D1 - Fan (Changed from D8)
+#define RELAY_4 5   // D1 - Fan
+
+void setRelayState(int pin, bool isOn) {
+  if (isOn) {
+    // To turn ON: Pull to GND
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+  } else {
+    // To turn OFF: Let it float (High Impedance)
+    // This allows the relay's internal 5V to take over
+    pinMode(pin, INPUT);
+  }
+}
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(9600); // Matches Python's speed
   
-  pinMode(RELAY_1, OUTPUT); digitalWrite(RELAY_1, LOW); 
-  pinMode(RELAY_2, OUTPUT); digitalWrite(RELAY_2, LOW); 
-  pinMode(RELAY_3, OUTPUT); digitalWrite(RELAY_3, LOW); 
-  pinMode(FAN_PIN, OUTPUT); digitalWrite(FAN_PIN, LOW); // Default OFF
+  // Initialize all as OFF (Input mode)
+  setRelayState(RELAY_1, false);
+  setRelayState(RELAY_2, false);
+  setRelayState(RELAY_3, false);
+  setRelayState(RELAY_4, false);
   
-  Serial.println("Slick Sync Ready. 4-Device Control Active (Active-HIGH).");
+  Serial.println("Slick Sync Ready. Floating-Logic Active.");
 }
 
 void loop() {
@@ -23,33 +37,24 @@ void loop() {
     String command = Serial.readStringUntil('\n');
     command.trim();
     
-    if (command.length() > 0) {
-      // ROCK (A)
-      if (command == "A1") {
-        digitalWrite(RELAY_1, HIGH); Serial.println("Rock ON");
-      } else if (command == "A0") {
-        digitalWrite(RELAY_1, LOW); Serial.println("Rock OFF");
-      }
+    if (command.length() >= 2) {
+      char device = command[0]; // A, B, C, or D
+      char state = command[1];  // 1 (ON) or 0 (OFF)
       
-      // MOON (B)
-      else if (command == "B1") {
-        digitalWrite(RELAY_2, HIGH); Serial.println("Moon ON");
-      } else if (command == "B0") {
-        digitalWrite(RELAY_2, LOW); Serial.println("Moon OFF");
-      }
-      
-      // DOG (C)
-      else if (command == "C1") {
-        digitalWrite(RELAY_3, HIGH); Serial.println("Dog ON");
-      } else if (command == "C0") {
-        digitalWrite(RELAY_3, LOW); Serial.println("Dog OFF");
-      }
+      int targetPin = -1;
+      String deviceName = "";
 
-      // FAN (D)
-      else if (command == "D1") {
-        digitalWrite(FAN_PIN, HIGH); Serial.println("Fan ON");
-      } else if (command == "D0") {
-        digitalWrite(FAN_PIN, LOW); Serial.println("Fan OFF");
+      if (device == 'A') { targetPin = RELAY_1; deviceName = "Rock"; }
+      else if (device == 'B') { targetPin = RELAY_2; deviceName = "Moon"; }
+      else if (device == 'C') { targetPin = RELAY_3; deviceName = "Dog"; }
+      else if (device == 'D') { targetPin = RELAY_4; deviceName = "Fan"; }
+
+      if (targetPin != -1) {
+        bool turnOn = (state == '1');
+        setRelayState(targetPin, turnOn);
+        
+        Serial.print(deviceName); 
+        Serial.println(turnOn ? " ON" : " OFF");
       }
     }
   }
